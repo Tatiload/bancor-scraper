@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: bancor-scraper
+    runtime: python
+    buildCommand: pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium
+    startCommand: python main.py
+    envVars:
+      - key: PORT
+        value: 8080
