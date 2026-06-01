@@ -39,13 +39,12 @@ async def scrape(url: str) -> dict:
             locale="es-AR",
             timezone_id="America/Argentina/Cordoba",
             extra_http_headers={
-                "Accept-Language":  "es-AR,es;q=0.9,en-US;q=0.8",
-                "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Referer":          "https://www.google.com/",
+                "Accept-Language": "es-AR,es;q=0.9,en-US;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://www.google.com/",
             },
         )
 
-        # Stealth: ocultar webdriver
         page = await context.new_page()
         await page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -54,10 +53,18 @@ async def scrape(url: str) -> dict:
             window.chrome = { runtime: {} };
         """)
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(random.uniform(2, 4))
+        # Esperar a networkidle para que Magento termine de cargar precios
+        await page.goto(url, wait_until="networkidle", timeout=45000)
 
-        # Extraer datos via JSON-LD (Magento 2 siempre lo incluye)
+        # Esperar explícitamente que aparezca el precio o el título
+        try:
+            await page.wait_for_selector(
+                '[data-price-type="finalPrice"] .price, [itemprop="price"], .price-wrapper .price',
+                timeout=10000
+            )
+        except:
+            pass  # Si no aparece, igual intentamos extraer
+
         data = await page.evaluate("""
             () => {
                 // 1. JSON-LD
@@ -69,28 +76,49 @@ async def scrape(url: str) -> dict:
                         const prod = items.find(o => o && o['@type'] === 'Product');
                         if (prod) {
                             const of = prod.offers || {};
-                            return {
-                                titulo: prod.name || '',
-                                sku:    prod.sku  || '',
-                                precio: String(of.price || of.lowPrice || ''),
-                                stock:  (of.availability || '').toLowerCase().includes('instock') ? 'En stock' : 'Sin stock',
-                                metodo: 'json-ld'
-                            };
+                            const precio = String(of.price || of.lowPrice || '');
+                            if (precio && precio !== '0') {
+                                return {
+                                    titulo: prod.name || '',
+                                    sku:    prod.sku  || '',
+                                    precio: precio,
+                                    stock:  (of.availability || '').toLowerCase().includes('instock') ? 'En stock' : 'Sin stock',
+                                    metodo: 'json-ld'
+                                };
+                            }
                         }
                     } catch(e) {}
                 }
 
-                // 2. Fallback meta tags
-                const titulo = (document.querySelector('h1.page-title span.base') || {}).innerText
+                // 2. Fallback: selectores del DOM de Magento 2
+                const titulo = document.querySelector('h1.page-title span.base')?.innerText
                             || document.querySelector('meta[property="og:title"]')?.content || '';
-                const sku    = document.querySelector('[itemprop="sku"]')?.innerText || '';
-                const precio = document.querySelector('[itemprop="price"]')?.getAttribute('content')
-                            || document.querySelector('[data-price-type="finalPrice"] .price')?.innerText || '';
+
+                const sku = document.querySelector('[itemprop="sku"]')?.innerText?.trim()
+                         || document.querySelector('.product.attribute.sku .value')?.innerText?.trim() || '';
+
+                // Precio: probar múltiples selectores de Magento 2
+                let precio = '';
+                const precioSelectors = [
+                    '[data-price-type="finalPrice"] .price',
+                    '.special-price [data-price-type="finalPrice"] .price',
+                    '.price-wrapper[data-price-type="finalPrice"] .price',
+                    '[itemprop="price"]',
+                    '.price-box .price',
+                ];
+                for (const sel of precioSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        precio = el.getAttribute('content') || el.innerText || '';
+                        if (precio.trim()) break;
+                    }
+                }
+
                 const inStock  = document.querySelector('.stock.available');
                 const outStock = document.querySelector('.stock.unavailable');
                 const stock = inStock ? 'En stock' : outStock ? 'Sin stock' : 'Desconocido';
 
-                return { titulo, sku, precio, stock, metodo: 'fallback' };
+                return { titulo, sku, precio, stock, metodo: 'fallback-dom' };
             }
         """)
 
@@ -108,15 +136,22 @@ async def scrape(url: str) -> dict:
 def formatear_precio(raw: str) -> str:
     if not raw:
         return ""
-    num_str = re.sub(r"[^\d.]", "", str(raw))
+    num_str = re.sub(r"[^\d.,]", "", str(raw))
+    # Manejar formato argentino: 1.234.567,89 o americano: 1234567.89
+    if "," in num_str and "." in num_str:
+        # Si la coma viene después del punto, es formato americano con miles
+        if num_str.rfind(".") > num_str.rfind(","):
+            num_str = num_str.replace(",", "")
+        else:
+            num_str = num_str.replace(".", "").replace(",", ".")
+    elif "," in num_str:
+        num_str = num_str.replace(",", ".")
     try:
         num = float(num_str)
         return "$ {:,.2f}".format(num).replace(",", "X").replace(".", ",").replace("X", ".")
     except:
         return raw
 
-
-# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
