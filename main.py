@@ -175,6 +175,45 @@ def scrape_endpoint():
     except Exception as e:
         return jsonify({"error": str(e), "titulo": "ERROR", "sku": "", "precio": "", "stock": ""}), 500
 
+@app.route("/debug")
+def debug_endpoint():
+    url = request.args.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "Falta ?url="}), 400
+
+    async def get_html():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox","--disable-blink-features=AutomationControlled",
+                      "--disable-dev-shm-usage","--disable-gpu","--single-process"],
+            )
+            context = await browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                viewport={"width": 1366, "height": 768},
+                locale="es-AR",
+            )
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await asyncio.sleep(5)
+            html = await page.content()
+            titulo = await page.title()
+            tiene_precio = await page.query_selector('[data-price-type="finalPrice"] .price') is not None
+            tiene_h1 = await page.query_selector('h1.page-title span.base') is not None
+            await browser.close()
+            return html[:6000], titulo, tiene_precio, tiene_h1
+
+    try:
+        html, titulo, tiene_precio, tiene_h1 = asyncio.run(get_html())
+        return jsonify({
+            "titulo_pagina": titulo,
+            "encontro_precio": tiene_precio,
+            "encontro_h1": tiene_h1,
+            "html": html,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
