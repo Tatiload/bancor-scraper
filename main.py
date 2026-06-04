@@ -54,8 +54,9 @@ async def scrape(url: str) -> dict:
         """)
 
         # Esperar a networkidle para que Magento termine de cargar precios
-        await page.goto(url, wait_until="networkidle", timeout=45000)
-
+        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+await page.wait_for_selector('h1.page-title span.base', timeout=15000)
+await page.wait_for_selector('[data-price-type="finalPrice"] .price', timeout=15000)
         # Esperar explícitamente que aparezca el precio o el título
         try:
             await page.wait_for_selector(
